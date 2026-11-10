@@ -1,0 +1,630 @@
+clc
+clear all
+close all
+
+% This file runs more simulations for a given agent
+%% Load agent
+% load saved agent
+    
+loaded_agent = load("agent_trained075.mat");
+agent = loaded_agent.agent;
+
+%% Training curves of the selected agent
+load('trainingStats075.mat'); % load trainingStats'
+
+% Extract the vectors inside
+episodes       = 1:length(trainingStats.EpisodeReward);
+episode_reward = trainingStats.EpisodeReward;
+average_reward = trainingStats.AverageReward;
+episode_Q0     = trainingStats.EpisodeQ0;
+
+% Episode Reward, Average Reward e Episode Q0
+figure('Name', 'Reinforcement Learning Training Progress', 'Color', [1 1 1], 'Position', [100 100 900 500]);
+
+% Plot 1: Reward per singolo episodio (thin blue line)
+plot(episodes, episode_reward, 'Color', [0.6 0.85 1], 'LineWidth', 0.8, 'DisplayName', 'Episode Reward');
+hold on;
+
+% Plot 2: Average Reward (thick blue line)
+plot(episodes, average_reward, 'Color', [0 0.4470 0.7410], 'LineWidth', 2.5, 'DisplayName', 'Average Reward (100 ep.)');
+
+% Plot 3: Episode Q0 / Value Estimate (yellow line)
+plot(episodes, episode_Q0, 'Color', [0.9290 0.6940 0.1250], 'LineWidth', 1.8, 'DisplayName', 'Episode Q_0 (Critic Estimate)');
+
+% Formatting and labels
+grid on;
+set(gca, 'GridLineStyle', ':', 'GridAlpha', 0.6, 'FontSize', 11);
+xlabel('Episode Number', 'FontSize', 12, 'FontWeight', 'bold');
+ylabel('Reward / Value', 'FontSize', 12, 'FontWeight', 'bold');
+title('PPO Training Progress & Critic Value Estimation', 'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'southeast', 'FontSize', 10);
+hold off;
+
+% 2. (Opzionale) Grafico pulito per confronto tra vari modelli
+% Se vuoi mostrare solo l'Average Reward per confrontare l'addestramento con 2 vs 3 pacchi:
+%figure('Name', 'Average Reward Comparison', 'Color', [1 1 1]);
+% plot(episodes, average_reward, 'LineWidth', 2, 'Color', [0 0.5 0.8]);
+% grid on;
+% xlabel('Episode');
+% ylabel('Average Reward');
+% title('Learning Curve (Average Reward)');
+
+%%
+clear env;
+clear classes;
+rehash;
+%% Load Environment
+env=RL_environment(); %now 10 pack
+%% Run simulation
+
+env.reset();
+env.VisualizeAnimation = false;
+% close all; % Chiude tutte le figure aperte (compreso il visualizzatore)
+% env.VisualizeAnimation = false;
+% env.VisualizeActions   = false;
+% env.VisualizeStates    = false;
+
+plot(env)
+
+rng(10)
+simOptions = rlSimulationOptions(MaxSteps=5000); % need to change this for 500 pack, first it was 5000, after 30000
+simOptions.NumSimulations = 1; %simOptions.NumSimulations = 10 originally
+
+tic;
+experience = sim(env, agent, simOptions);
+t_una_sim = toc;
+fprintf('Tempo per 1 simulazione: %.1f secondi\n', t_una_sim);
+fprintf('Tempo stimato per 100 simulazioni: %.1f minuti\n', t_una_sim*100/60);
+
+%% Post processing: compute all the quantity of the simualtion u just run
+
+y_history = env.y_boxes_vect; 
+x_history = env.x_boxes_vect;
+d_boxes   = env.d_boxes; 
+exit_order = env.exit_order;
+index_exit = env.index_exit;
+
+% Check if at least 2 packages exited to evaluate a gap
+if index_exit < 2
+    warning('Not enough packages exited the system to calculate gaps.');
+else
+    % Initialize arrays
+    exit_timestamps = zeros(index_exit, 1);
+    exit_gaps = zeros(index_exit - 1, 1);
+    
+    % Threshold line where the sorting zone ends and exit treadmill begins
+    exit_threshold = env.d_AMS * env.n_i_AMS; % 0.2 * 5 = 1.0 meter
+    
+    % 1. Find the exact timestamp when each parcel crossed the exit line
+    for k = 1:index_exit
+        parcel_id = exit_order(k);
+        % Find the first timestep index where this parcel's Y coordinate exceeded 1.0m
+        time_idx = find(y_history(:, parcel_id) >= exit_threshold, 1);
+        
+        if ~isempty(time_idx)
+            % Convert timestep index to actual simulation time (seconds)
+            exit_timestamps(k) = time_idx * env.dt;
+        else
+            % Fallback safety calculation if log boundary differs
+            exit_timestamps(k) = NaN;
+        end
+    end
+end
+
+
+for k = 1:(index_exit - 1)
+        lead_parcel = exit_order(k);
+        trail_parcel = exit_order(k+1);
+        
+        % Identify the specific timestep when the leading parcel crossed the exit line
+        exit_time_idx = find(y_history(:, lead_parcel) >= exit_threshold, 1);
+        
+        % SAFETY CHECK: If the simulation cut off or the parcel didn't cross cleanly
+        if isempty(exit_time_idx)
+            % Fallback: Use the final frame of the simulation history
+            exit_time_idx = size(y_history, 1); 
+        end
+        
+        % Extract positions (guaranteed to be scalars now)
+        y_lead = y_history(exit_time_idx, lead_parcel);
+        y_trail = y_history(exit_time_idx, trail_parcel);
+        
+        % Calculate the physical gap: Nose of trailing box to Tail of leading box
+        y_nose_trail = y_trail + (d_boxes(trail_parcel) / 2); % +
+        y_tail_lead  = y_lead - (d_boxes(lead_parcel) / 2); % - 
+        
+        % This will now safely receive a single scalar value
+        exit_gaps(k) = y_tail_lead - y_nose_trail;
+end
+
+% Calculate average gap between exiting parcels
+average_gap = mean(exit_gaps, 'omitnan');
+standard_gap = std(exit_gaps, 'omitnan');
+fprintf('Average gap between exiting parcels: %.2f meters\n', average_gap);
+fprintf('Standard deviation gap in the simulation: %.2f meters\n', standard_gap);
+
+%% Plot of relevance for the run simulation
+
+
+%% CALCOLO DEL SINGULATION RATE (TASSO DI SINGOLAZIONE)
+
+% 1. PARAMETRI DI RIFERIMENTO (Imposta i tuoi valori)
+target_gap     = 0.05;  % Gap target desiderato [m] (es. 5 cm)
+tolerance      = 0.03;  % Tolleranza ammessa [m] (es. ±1 cm -> range [0.04m, 0.06m])
+min_safety_gap = 0.02;  % Distanza minima di sicurezza [m] (es. 2 cm)
+
+% 2. FILTRAGGIO DEI DATI VALIDI (Esclude i valori NaN)
+valid_gaps = exit_gaps(~isnan(exit_gaps));
+total_gaps = length(valid_gaps);
+
+if total_gaps == 0
+    warning('Nessun gap valido presente per il calcolo del Tasso di Singolazione.');
+else
+    % A. CRITERIO TARGET (Accuratezza perfetta)
+    % Verifica quali gap ricadono nell'intervallo [target - tolerance, target + tolerance]
+    is_target_success = (valid_gaps >= (target_gap - tolerance)) & ...
+                        (valid_gaps <= (target_gap + tolerance));
+    
+    singulation_rate_target = (sum(is_target_success) / total_gaps) * 100;
+
+    % B. CRITERIO DI SICUREZZA (Non-Collisione / Separazione Minima)
+    % Verifica quali gap sono superiori o uguali alla soglia minima di sicurezza
+    is_safe = (valid_gaps >= min_safety_gap);
+    
+    singulation_rate_safety = (sum(is_safe) / total_gaps) * 100;
+
+    % C. CONTEGGIO PACCHI TROPPO VICINI (Rischio collisione/sovrapposizione)
+    is_too_close = (valid_gaps < min_safety_gap);
+    collision_risk_rate = (sum(is_too_close) / total_gaps) * 100;
+
+    % 3. STAMPA A SCHERMO DEI RISULTATI
+    fprintf('\n================ METRICHE DI SINGOLAZIONE ================\n');
+    fprintf('Gap Medio Misurato           : %.4f m (%.2f cm)\n', average_gap, average_gap*100);
+    fprintf('Deviazione Standard          : %.4f m (%.2f cm)\n', standard_gap, standard_gap*100);
+    fprintf('----------------------------------------------------------\n');
+    fprintf('Singulation Rate (Target %.2fm ± %.2fm) : %.1f%%\n', ...
+            target_gap, tolerance, singulation_rate_target);
+    fprintf('Safety Separation Rate (Gap >= %.2fm)  : %.1f%%\n', ...
+            min_safety_gap, singulation_rate_safety);
+    fprintf('Percentuale Rischio Collisione (< %.2fm): %.1f%%\n', ...
+            min_safety_gap, collision_risk_rate);
+    fprintf('==========================================================\n');
+end
+
+
+%% plot of 9 exit gaps with fake hystogram (LOW NUMBER OF PACKAGES)
+% Dati dei 9 gap
+gaps_uscita = exit_gaps;
+target_gap  = 0.05;
+
+% Calcolo statistiche
+mu_gap  = mean(gaps_uscita);
+std_gap = std(gaps_uscita);
+var_gap = var(gaps_uscita);
+
+figure('Name', 'Simulation with hystogram', 'Color', [1 1 1], 'Position', [100 100 800 480]);
+
+% Grafico a barre
+bar_labels = arrayfun(@(i) sprintf('Pack %d-%d', i, i+1), 1:length(gaps_uscita), 'UniformOutput', false);
+b = bar(categorical(bar_labels), gaps_uscita, 0.45, 'FaceColor', [0.2 0.6 0.85], 'EdgeColor', 'none');
+hold on;
+
+% 1. Linea Target (Rossa tratteggiata)
+h1 = yline(target_gap, '--r', 'LineWidth', 2, 'DisplayName', sprintf('Target (%.2f m)', target_gap));
+
+% 2. Linea Media Reale (Verde continua)
+h2 = yline(mu_gap, '-g', 'LineWidth', 2, 'DisplayName', sprintf('Mean (%.3f m)', mu_gap));
+
+% Valori numerici sopra le barre
+for i = 1:length(gaps_uscita)
+    text(i, gaps_uscita(i) + 0.012, sprintf('%.3f m', gaps_uscita(i)), ...
+        'HorizontalAlignment', 'center', 'FontSize', 9.5, 'FontWeight', 'bold');
+end
+
+% 3. Casetta Statistiche (Text Box) pulita nell'angolo libero (in alto a sinistra)
+dim = [0.15 0.68 0.25 0.18]; % [x y larghezza altezza]
+stats_text = {
+    sprintf('\\bfEpisode statistics:'), ...
+    sprintf('Mean (\\mu): %.3f m', mu_gap), ...
+    sprintf('Std. Dev. (\\sigma): %.3f m', std_gap), ...
+    sprintf('Variance (\\sigma^2): %.4f m^2', var_gap)
+};
+annotation('textbox', dim, 'String', stats_text, 'FitBoxToText', 'on', ...
+    'BackgroundColor', [0.95 0.95 0.95 0.85], 'EdgeColor', [0.6 0.6 0.6], ...
+    'FontSize', 10, 'FontName', 'Helvetica');
+
+grid on; set(gca, 'GridLineStyle', ':', 'FontSize', 11);
+xlabel('pair of consecutive packages', 'FontSize', 11, 'FontWeight', 'bold');
+ylabel('vertical gap at exit (m)', 'FontSize', 11, 'FontWeight', 'bold');
+title('Distance at exit for 20 packages ', 'FontSize', 12, 'FontWeight', 'bold');
+ylim([0, max(gaps_uscita)*1.25]);
+
+% Legenda in alto a destra
+legend([h1, h2], 'Location', 'northeast');
+
+%% PLOT FOR BIG NUMBER OF PACKAGES
+
+% Usa Istogramma di Densità + Curva KDE + Ombreggiatura deviazione standard
+
+% 1. Filtraggio e Parametri
+gaps_uscita = exit_gaps(~isnan(exit_gaps)); % Rimuove eventuali NaN
+target_gap  = 0.05;  % Target: 0.05 m (5 cm)
+tolerance   = 0.02;  % Tolleranza: ±0.02 m (±2 cm) -> range [0.03m, 0.07m]
+
+N = length(gaps_uscita);
+if N < 2
+    error('Numero di gap insufficiente per l''analisi statistica.');
+end
+
+% 2. Calcolo Statistiche Globali
+mu_gap  = mean(gaps_uscita);
+std_gap = std(gaps_uscita);
+var_gap = var(gaps_uscita);
+
+% Singulation Rate (% di pacchi entro la tolleranza dal target)
+is_success = (gaps_uscita >= (target_gap - tolerance)) & (gaps_uscita <= (target_gap + tolerance));
+singulation_rate = (sum(is_success) / N) * 100;
+
+% 3. Creazione Figura
+figure('Name', 'Large Scale Gap Distribution', 'Color', [1 1 1], 'Position', [100 100 850 500]);
+
+% A. Istogramma Normalizzato (Probability Density Function)
+% Il numero di bin scala automaticamente con la radice del numero di dati
+n_bins = min(50, max(15, round(sqrt(N)))); 
+hHist = histogram(gaps_uscita, n_bins, 'Normalization', 'count', ...
+    'FaceColor', [0.2 0.6 0.85], 'EdgeColor', 'w', 'FaceAlpha', 0.6, ...
+    'DisplayName', 'Measured frequence (count)');
+hold on;
+
+% B. Curva KDE (Stima di Densità Morbida)
+[f_kde, xi_kde] = ksdensity(gaps_uscita);
+plot(xi_kde, f_kde, 'Color', [0.0 0.25 0.55], 'LineWidth', 2.5, ...
+    'DisplayName', 'KDE curve');
+
+% C. Fascia Ombreggiata per Deviazione Standard (\mu ± \sigma)
+yl = ylim;
+h_std = patch([mu_gap-std_gap, mu_gap+std_gap, mu_gap+std_gap, mu_gap-std_gap], ...
+              [0, 0, yl(2), yl(2)], [0.8 0.9 0.8], 'FaceAlpha', 0.35, 'EdgeColor', 'none', ...
+              'DisplayName', sprintf('Interval \\mu \\pm \\sigma (\\pm%.3f m)', std_gap));
+
+% D. Linea Target
+h_target = xline(target_gap, '--r', 'LineWidth', 2.2, ...
+    'DisplayName', sprintf('Target (%.2f m)', target_gap));
+
+% E. Linea Media Reale
+h_mean = xline(mu_gap, '-g', 'LineWidth', 2.2, ...
+    'DisplayName', sprintf('Mean \\mu (%.3f m)', mu_gap));
+
+% Riporta le linee in primo piano sopra l'ombreggiatura
+uistack(h_target, 'top');
+uistack(h_mean, 'top');
+
+% 4. Box Informativo Statistiche
+dim = [0.15 0.58 0.28 0.28];
+stats_text = {
+    sprintf('\\bfDataset Statistics (N = %d):', N), ...
+    sprintf('Mean (\\mu): %.4f m', mu_gap), ...
+    sprintf('Std. Dev. (\\sigma): \\pm%.4f m', std_gap), ...
+    sprintf('Variance (\\sigma^2): %.6f m^2', var_gap), ...
+    sprintf('Target Gap: %.2f m', target_gap), ...
+    sprintf('\\bfSingulation Rate: %.1f%%', singulation_rate)
+};
+annotation('textbox', dim, 'String', stats_text, 'FitBoxToText', 'on', ...
+    'BackgroundColor', [0.98 0.98 0.98 0.90], 'EdgeColor', [0.5 0.5 0.5], ...
+    'FontSize', 10, 'FontName', 'Helvetica');
+
+% Formattazione assi e titoli
+grid on; set(gca, 'GridLineStyle', ':', 'FontSize', 11);
+xlabel('Vertical Gap at Exit (m)', 'FontSize', 11, 'FontWeight', 'bold');
+ylabel('frequency', 'FontSize', 11, 'FontWeight', 'bold');
+title(sprintf('Exit Gap Distribution for %d Packages (Large Scale Evaluation)', N), ...
+    'FontSize', 12, 'FontWeight', 'bold');
+
+% Legenda
+legend('Location', 'northeast', 'FontSize', 9.5);
+hold off;
+
+%% Post-Processing per Simulazioni Multiple (10 episodi)
+% ================================
+% numSims = length(experience);
+% exit_threshold = env.d_AMS * env.n_i_AMS; % 1.0 metro
+% dt_sim = env.dt;
+% 
+% % Strutture per accumulare tutti i gap di tutte le simulazioni
+% all_exit_gaps_combined = []; 
+% sim_stats = struct('avg_gap', {}, 'std_gap', {}, 'index_exit', {}, 'success_rate', {});
+% 
+% fprintf('\n================ RISULTATI PER SINGOLA SIMULAZIONE ================\n');
+% 
+% for sim_idx = 1:numSims
+%     % 1. Estraggo i dati salvati per la simulazione i-esima
+%     sim_info = experience(sim_idx).SimulationInfo;
+% 
+%     y_history  = sim_info.y_boxes_vect;
+%     x_history  = sim_info.x_boxes_vect;
+%     exit_order = sim_info.exit_order;
+%     index_exit = sim_info.index_exit;
+% 
+% 
+%     if isfield(sim_info, 'd_boxes')
+%         d_boxes = sim_info.d_boxes;
+%     else
+%         d_boxes = env.d_boxes; % Fallback
+%     end
+% 
+%     % Controlla se sono usciti almeno 2 pacchi
+%     if index_exit < 2
+%         warning('Simulazione %d: Meno di 2 pacchi usciti (%d). Impossibile calcolare i gap.', sim_idx, index_exit);
+%         sim_stats(sim_idx).avg_gap = NaN;
+%         sim_stats(sim_idx).std_gap = NaN;
+%         sim_stats(sim_idx).index_exit = index_exit;
+%         sim_stats(sim_idx).success_rate = NaN;
+%         continue;
+%     end
+% 
+%     % 2. Calcolo dei gap per questa simulazione
+%     exit_gaps = zeros(index_exit - 1, 1);
+% 
+%     for k = 1:(index_exit - 1)
+%         lead_parcel  = exit_order(k);
+%         trail_parcel = exit_order(k+1);
+% 
+%         % Timestep di attraversamento del leader
+%         exit_time_idx = find(y_history(:, lead_parcel) >= exit_threshold, 1);
+% 
+%         if isempty(exit_time_idx)
+%             exit_time_idx = size(y_history, 1); 
+%         end
+% 
+%         % Estrazione posizioni
+%         y_lead  = y_history(exit_time_idx, lead_parcel);
+%         y_trail = y_history(exit_time_idx, trail_parcel);
+% 
+%         % Calcolo del gap fisico (Coda pacco davanti - Testa pacco dietro)
+%         y_nose_trail = y_trail + (d_boxes(trail_parcel) / 2);
+%         y_tail_lead  = y_lead - (d_boxes(lead_parcel) / 2);
+% 
+%         exit_gaps(k) = y_tail_lead - y_nose_trail;
+%     end
+% 
+%     % 3. Salva statistiche della simulazione corrente
+%     avg_gap_sim = mean(exit_gaps, 'omitnan');
+%     std_gap_sim = std(exit_gaps, 'omitnan');
+% 
+%     % Success rate: percentuale di gap entro [target - tolleranza, target + tolleranza]
+%     valid_gaps = exit_gaps(~isnan(exit_gaps));
+%     is_success = (valid_gaps >= (target_gap - tolerance)) & (valid_gaps <= (target_gap + tolerance));
+%     success_rate_sim = 100 * sum(is_success) / length(valid_gaps);
+% 
+%     sim_stats(sim_idx).avg_gap = avg_gap_sim;
+%     sim_stats(sim_idx).std_gap = std_gap_sim;
+%     sim_stats(sim_idx).index_exit = index_exit;
+%     sim_stats(sim_idx).success_rate = success_rate_sim;
+% 
+%     % Accumulo nell'array globale
+%     all_exit_gaps_combined = [all_exit_gaps_combined; exit_gaps];
+% 
+%     % Stampa a schermo per ogni simulazione
+%     fprintf('Simulazione %2d | Pacchi Usciti: %3d | Gap Medio: %.3f m | Std Gap: %.3f m\n | Success Rate: %.1f%%\n', ...
+%         sim_idx, index_exit, avg_gap_sim, std_gap_sim, success_rate_sim);
+% end
+% 
+% %% === STATISTICHE E ISTOGRAMMA GLOBALE (TUTTE LE SIMULAZIONI) ===
+% fprintf('\n================ RIEPILOGO COMPLESSIVO (STATISTICA GLOBALE) ================\n');
+% fprintf('Totale Simulazioni Valutate : %d\n', numSims);
+% fprintf('Totale Gap Misurati         : %d\n', length(all_exit_gaps_combined));
+% fprintf('Gap Medio GLOBALE           : %.3f m\n', mean(all_exit_gaps_combined, 'omitnan'));
+% fprintf('Deviazione Standard GLOBALE : %.3f m\n', std(all_exit_gaps_combined, 'omitnan'));
+% fprintf('===========================================================================\n');
+% 
+% % Graphing overall distribution
+% figure('Name', 'Distribuzione Globale dei Gap di Uscita');
+% n_bins = 20;
+% histogram(all_exit_gaps_combined, n_bins, 'Normalization', 'count', ...
+%     'FaceColor', [0.2 0.6 0.85], 'EdgeColor', 'w', 'FaceAlpha', 0.7, ...
+%     'DisplayName', 'Frequenza Pacchi');
+% grid on;
+% xlabel('Gap Tra i Pacchi (m)');
+% ylabel('Numero di Pacchi (Conteggio Assoluto)');
+% title(sprintf('Distribuzione Gap di Uscita Cumulata (%d Simulazioni)', numSims));
+% ================================
+%% Run simulation (una alla volta, per poter estrarre i dati di ognuna)
+
+numSims = 100;           % era simOptions.NumSimulations
+exit_threshold = env.d_AMS * env.n_i_AMS;
+
+singleSimOptions = rlSimulationOptions(MaxSteps=5000); % need to change this for 1000 pack
+singleSimOptions.NumSimulations = 1;
+
+all_x_history  = cell(numSims,1);
+all_y_history  = cell(numSims,1);
+all_exit_order = cell(numSims,1);
+all_index_exit = zeros(numSims,1);
+all_d_boxes    = cell(numSims,1);
+
+env.VisualizeAnimation = false;
+rng(10);
+
+for sim_idx = 1:numSims
+    env.reset();
+    experience = sim(env, agent, singleSimOptions); %#ok<NASGU>
+
+    % A questo punto env contiene ancora lo stato della simulazione appena
+    % conclusa (il prossimo reset() la sovrascriverà)
+    all_x_history{sim_idx}  = env.x_boxes_vect(1:env.cont, :);
+    all_y_history{sim_idx}  = env.y_boxes_vect(1:env.cont, :);
+    all_exit_order{sim_idx} = env.exit_order;
+    all_index_exit(sim_idx) = env.index_exit;
+    all_d_boxes{sim_idx}    = env.d_boxes;
+end
+
+%% Post-Processing per Simulazioni Multiple
+
+target_gap = 0.05;   % gap target [m]
+tolerance  = 0.02;   % tolleranza ± [m]
+all_exit_gaps_combined = [];
+sim_stats = struct('avg_gap', {}, 'std_gap', {}, 'index_exit', {}, 'success_rate', {});
+
+fprintf('\n================ RISULTATI PER SINGOLA SIMULAZIONE ================\n');
+
+for sim_idx = 1:numSims
+    y_history  = all_y_history{sim_idx};
+    exit_order = all_exit_order{sim_idx};
+    index_exit = all_index_exit(sim_idx);
+    d_boxes    = all_d_boxes{sim_idx};
+
+    if index_exit < 2
+        warning('Simulazione %d: Meno di 2 pacchi usciti (%d).', sim_idx, index_exit);
+        sim_stats(sim_idx).avg_gap = NaN;
+        sim_stats(sim_idx).std_gap = NaN;
+        sim_stats(sim_idx).index_exit = index_exit;
+        sim_stats(sim_idx).success_rate = NaN;
+        continue;
+    end
+
+    exit_gaps = zeros(index_exit - 1, 1);
+    for k = 1:(index_exit - 1)
+        lead_parcel  = exit_order(k);
+        trail_parcel = exit_order(k+1);
+
+        exit_time_idx = find(y_history(:, lead_parcel) >= exit_threshold, 1);
+        if isempty(exit_time_idx)
+            exit_time_idx = size(y_history, 1);
+        end
+
+        y_lead  = y_history(exit_time_idx, lead_parcel);
+        y_trail = y_history(exit_time_idx, trail_parcel);
+
+        y_nose_trail = y_trail + (d_boxes(trail_parcel) / 2);
+        y_tail_lead  = y_lead  - (d_boxes(lead_parcel)  / 2);
+
+        exit_gaps(k) = y_tail_lead - y_nose_trail;
+    end
+
+    avg_gap_sim = mean(exit_gaps, 'omitnan');
+    std_gap_sim = std(exit_gaps, 'omitnan');
+
+    % Success rate: percentuale di gap entro [target - tolleranza, target + tolleranza]
+    valid_gaps = exit_gaps(~isnan(exit_gaps));
+    % is_success = (valid_gaps >= (target_gap - tolerance)) & (valid_gaps <= (target_gap + tolerance));
+    min_safety_gap = 0.0;   % oppure un piccolo margine, es. 0.01 m
+    is_success = valid_gaps >= min_safety_gap;
+    success_rate_sim = 100 * sum(is_success) / length(valid_gaps);
+
+    sim_stats(sim_idx).avg_gap = avg_gap_sim;
+    sim_stats(sim_idx).std_gap = std_gap_sim;
+    sim_stats(sim_idx).index_exit = index_exit;
+    sim_stats(sim_idx).success_rate = success_rate_sim;
+
+    all_exit_gaps_combined = [all_exit_gaps_combined; exit_gaps]; %#ok<AGROW>
+
+    fprintf('Simulazione %2d | Pacchi Usciti: %3d | Gap Medio: %.3f m | Std Gap: %.3f m\n | Success Rate: %.1f%%\n', ...
+        sim_idx, index_exit, avg_gap_sim, std_gap_sim, success_rate_sim);
+end
+
+
+%% Plot: Gap medio ± deviazione standard per ogni simulazione
+
+sim_numbers = 1:numSims;
+mean_gaps   = [sim_stats.avg_gap];
+std_gaps    = [sim_stats.std_gap];
+% 1. CALCOLO LIMITI DELLA BANDA (MEDIA ± STD)
+y_upper = mean_gaps + std_gaps;
+y_lower = mean_gaps - std_gaps;
+
+% Costruzione del poligono (coordinate X e Y riavvolte su se stesse)
+x_fill = [sim_numbers, fliplr(sim_numbers)];
+y_fill = [y_upper, fliplr(y_lower)];
+
+figure('Name', 'Mean gap for simulation', 'Color', [1 1 1], 'Position', [100 100 800 480]);
+
+% errorbar(sim_numbers, mean_gaps, std_gaps, 'o', ...
+%     'Color', [0 0.4470 0.7410], 'LineWidth', 1.8, ...
+%     'MarkerSize', 7, 'MarkerFaceColor', [0 0.4470 0.7410], ...
+%     'CapSize', 8, 'DisplayName', 'Media \pm Std');
+ hold on;
+
+% Linea target di riferimento (opzionale)
+target_gap = 0.05;
+yline(target_gap, '--r', 'LineWidth', 1.5, ...
+    'DisplayName', sprintf('Target (%.2f m)', target_gap));
+
+% Linea della media globale su tutte le simulazioni (opzionale)
+global_mean = mean(mean_gaps, 'omitnan');
+yline(global_mean, '-g', 'LineWidth', 1.5, ...
+    'DisplayName', sprintf('Global mean (%.3f m)', global_mean));
+
+% 2. ZONA COLORATA SFUMATA (Disegnata per prima, così sta sotto ai punti)
+fill(x_fill, y_fill, [0 0.4470 0.7410], ...
+    'FaceAlpha', 0.2, ...          % Trasparenza (0.2 = 20% opaco)
+    'EdgeColor', 'none', ...       % Nessun bordo marcato
+    'DisplayName', 'Std Dev Band');
+
+grid on;
+set(gca, 'GridLineStyle', ':', 'FontSize', 11);
+xlabel('Simualtion number', 'FontSize', 12, 'FontWeight', 'bold');
+ylabel('Mean gap at exit (m)', 'FontSize', 12, 'FontWeight', 'bold');
+title('Mean gap \pm standard deviation for each simulation', ...
+    'FontSize', 13, 'FontWeight', 'bold');
+xlim([0.5, numSims + 0.5]);
+xticks(1:20:numSims);
+legend('Location', 'best', 'FontSize', 10);
+hold off;
+
+%% Plot: Success rate per ogni simulazione
+
+sim_numbers   = 1:numSims;
+success_rates = [sim_stats.success_rate];
+
+figure('Name', 'Success rate for simualtion', 'Color', [1 1 1], 'Position', [100 100 800 480]);
+
+plot(sim_numbers, success_rates, 'o-', ...
+    'Color', [0.2 0.6 0.85], 'LineWidth', 2, ...
+    'MarkerSize', 7, 'MarkerFaceColor', [0.2 0.6 0.85], ...
+    'DisplayName', 'Success Rate');
+hold on;
+
+% % Valori numerici sopra le barre
+% for k = 1:10:numSims
+%     if ~isnan(success_rates(k))
+%         text(k, success_rates(k) + 1.5, sprintf('%.1f%%', success_rates(k)), ...
+%             'HorizontalAlignment', 'center', 'FontSize', 9.5, 'FontWeight', 'bold');
+%     end
+% end
+
+% Linea della media globale
+global_success_rate = mean(success_rates, 'omitnan');
+yline(global_success_rate, '-g', 'LineWidth', 1.8, ...
+    'DisplayName', sprintf('Mean (%.1f%%)', global_success_rate));
+
+grid on;
+set(gca, 'GridLineStyle', ':', 'FontSize', 11);
+xlabel('Simulation number', 'FontSize', 12, 'FontWeight', 'bold');
+ylabel('Success rate (%)', 'FontSize', 12, 'FontWeight', 'bold');
+title(sprintf('Success Rate per simulation (Target %.2fm \\pm %.2fm)', target_gap, tolerance), ...
+    'FontSize', 13, 'FontWeight', 'bold');
+xlim([0.5, numSims + 0.5]);
+xticks(1:5:numSims);
+ylim([0, 105]);
+legend('Location', 'best', 'FontSize', 10);
+hold off;
+
+%% Analisi distribuzione gap per scegliere target/tolleranza sensati
+
+fprintf('\n================ STATISTICHE GLOBALI GAP ================\n');
+fprintf('Numero totale di gap misurati : %d\n', length(all_exit_gaps_combined));
+fprintf('Media                         : %.4f m\n', mean(all_exit_gaps_combined, 'omitnan'));
+fprintf('Mediana                       : %.4f m\n', median(all_exit_gaps_combined, 'omitnan'));
+fprintf('Deviazione standard           : %.4f m\n', std(all_exit_gaps_combined, 'omitnan'));
+fprintf('Minimo                        : %.4f m\n', min(all_exit_gaps_combined));
+fprintf('Massimo                       : %.4f m\n', max(all_exit_gaps_combined));
+fprintf('Percentile 25 / 75            : %.4f / %.4f m\n', ...
+    prctile(all_exit_gaps_combined,25), prctile(all_exit_gaps_combined,75));
+fprintf('===========================================================\n');
+
+figure('Name','Distribuzione gap globale');
+histogram(all_exit_gaps_combined, 30, 'FaceColor',[0.2 0.6 0.85]);
+xline(0.05, '--r', 'Target 0.05m', 'LineWidth',2);
+xlabel('Gap (m)'); ylabel('Conteggio');
+title('Distribuzione di tutti i gap misurati');
+grid on;

@@ -1,4 +1,4 @@
-<h1 align="center">Parcel singulation on an Active Motor Surface with deep reinforcement learning (PPO)</h1>
+<h1 align="center">Parcel singulation on an Active Motor Surface with Deep Reinforcement Learning (PPO)</h1>
 
 <p align="center">
   <b>Course 062119 – Machine Learning for Mechanical Systems · Politecnico di Milano · A.Y. 2025/26</b> Department of Mechanical Engineering
